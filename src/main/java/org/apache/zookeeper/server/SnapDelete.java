@@ -6,7 +6,7 @@ import java.io.BufferedInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Stack;
+import java.util.ArrayList;
 import java.util.zip.Adler32;
 import java.util.zip.CheckedInputStream;
 import org.apache.jute.BinaryInputArchive;
@@ -21,9 +21,9 @@ public class SnapDelete implements Watcher {
   private ZooKeeper zk;
   private final ReferenceCountedACLCache aclCache = new ReferenceCountedACLCache();
   private String znodeToDelete;
-  private Stack<String> znodesToDelete;
+  private ArrayList<String> znodesToDelete;
   private long numberOfZnodes = 0;
-  private long numberOfZnodesToDelete = 0;
+  private int numberOfZnodesToDelete = 0;
   private String digestAuth;
 
   public static void main(String[] args) throws IOException, InterruptedException {
@@ -110,13 +110,15 @@ public class SnapDelete implements Watcher {
     System.out.println(path);
     DataNode node = new DataNode();
 
-    znodesToDelete = new Stack<String>();
-    znodesToDelete.push(this.znodeToDelete);
+    znodesToDelete = new ArrayList<>(45 * 1000 * 1000);
+    znodesToDelete.add(this.znodeToDelete);
+
+    ++numberOfZnodesToDelete;
     ++numberOfZnodes;
 
     while (!path.equals("/")) {
       if (path.startsWith(znodeToDelete + "/")) {
-        znodesToDelete.push(path);
+        znodesToDelete.add(path);
         ++numberOfZnodesToDelete;
       }
 
@@ -135,8 +137,8 @@ public class SnapDelete implements Watcher {
   private void deleteTree() throws InterruptedException {
     System.out.println("\n*** Deleting subtree: " + numberOfZnodesToDelete + " znodes");
     try (ProgressBar pb = new ProgressBar("Deleting", numberOfZnodesToDelete)) {
-      while (!znodesToDelete.empty()) {
-        String znode = znodesToDelete.pop();
+      for (int i = numberOfZnodesToDelete; i >= 0; --i) {
+        String znode = znodesToDelete.get(i);
         delete(znode);
         pb.step();
       }
