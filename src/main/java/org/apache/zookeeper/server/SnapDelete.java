@@ -7,11 +7,16 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.Adler32;
 import java.util.zip.CheckedInputStream;
 import org.apache.jute.BinaryInputArchive;
 import org.apache.jute.InputArchive;
+import org.apache.zookeeper.AsyncCallback;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Op;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooKeeper;
@@ -25,6 +30,7 @@ public class SnapDelete implements Watcher {
   private long numberOfZnodes = 0;
   private int numberOfZnodesToDelete = 0;
   private String digestAuth;
+  private int batchSize = 1000;
 
   public static void main(String[] args) throws IOException, InterruptedException {
     if (args.length < 3) {
@@ -134,13 +140,45 @@ public class SnapDelete implements Watcher {
     System.out.println("*** Znodes to delete: " + numberOfZnodesToDelete);
   }
 
+  private static class BatchedDeleteCbContext {
+    Semaphore sem;
+    AtomicBoolean success;
+
+    BatchedDeleteCbContext(int rateLimit) {
+      sem = new Semaphore(rateLimit);
+      success = new AtomicBoolean(true);
+    }
+  }
+
+
   private void deleteTree() throws InterruptedException {
     System.out.println("\n*** Deleting subtree: " + numberOfZnodesToDelete + " znodes");
     try (ProgressBar pb = new ProgressBar("Deleting", numberOfZnodesToDelete)) {
+      int rateLimit = 10;
+      List<Op> ops = new ArrayList<>();
+
+      BatchedDeleteCbContext context = new BatchedDeleteCbContext(rateLimit);
+      AsyncCallback.MultiCallback cb = (rc, path, ctx, opResults) -> {
+        ((BatchedDeleteCbContext) ctx).sem.release();
+        if (rc != KeeperException.Code.OK.intValue()) {
+          ((BatchedDeleteCbContext) ctx).success.set(false);
+        }
+      };
+
       for (int i = numberOfZnodesToDelete - 1; i >= 0; --i) {
         String znode = znodesToDelete.get(i);
-        delete(znode);
-        pb.step();
+        ops.add(Op.delete(znode, -1));
+
+        if (ops.size() == batchSize || i == 0) {
+          if (!context.success.get()) {
+            // fail fast
+            break;
+          }
+          context.sem.acquire();
+          zk.multi(ops, cb, context);
+          pb.stepBy(ops.size());
+          ops = new ArrayList<>();
+        }
       }
     }
   }
@@ -148,6 +186,7 @@ public class SnapDelete implements Watcher {
   private void delete(String znode) throws InterruptedException {
     try {
       zk.delete(znode, -1);
+
     } catch (KeeperException e) {
       if (e.code() != KeeperException.Code.NONODE) {
         System.out.println(znode + ": " + e.getMessage());
