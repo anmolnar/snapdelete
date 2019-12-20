@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.Adler32;
@@ -23,6 +24,7 @@ import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.server.persistence.FileHeader;
 
 public class SnapDelete implements Watcher {
+  private String zkHostname;
   private ZooKeeper zk;
   private final ReferenceCountedACLCache aclCache = new ReferenceCountedACLCache();
   private String znodeToDelete;
@@ -31,6 +33,7 @@ public class SnapDelete implements Watcher {
   private int numberOfZnodesToDelete = 0;
   private String digestAuth;
   private int batchSize = 1000;
+  private CountDownLatch connected = new CountDownLatch(1);
 
   public static void main(String[] args) throws IOException, InterruptedException {
     if (args.length < 3) {
@@ -58,11 +61,7 @@ public class SnapDelete implements Watcher {
     loadSnapshot(snapshotFile);
 
     // Connect to ZooKeeper
-    zk = new ZooKeeper(zkHostname, 30000, this);
-    if (digestAuth != null) {
-      zk.addAuthInfo("digest", digestAuth.getBytes());
-    }
-    System.out.println("\n*** Connected to ZooKeeper");
+    connectToZK(zkHostname);
 
     // Delete nodes
     deleteTree();
@@ -70,9 +69,23 @@ public class SnapDelete implements Watcher {
     zk.close();
   }
 
+  private void connectToZK(String zkHostname) throws IOException, InterruptedException {
+    this.zkHostname = zkHostname;
+    connected = new CountDownLatch(1);
+    zk = new ZooKeeper(zkHostname, 30000, this);
+    if (digestAuth != null) {
+      zk.addAuthInfo("digest", digestAuth.getBytes());
+    }
+    connected.await();
+    System.out.println("\n*** Connected to ZooKeeper");
+  }
+
   // Watcher
   public void process(WatchedEvent watchedEvent) {
     System.out.println(watchedEvent);
+    if (watchedEvent.getState() == Event.KeeperState.SyncConnected) {
+      connected.countDown();
+    }
   }
 
   private void loadSnapshot(String snapshotFileName) throws IOException, InterruptedException {
@@ -171,8 +184,10 @@ public class SnapDelete implements Watcher {
 
         if (ops.size() == batchSize || i == 0) {
           if (!context.success.get()) {
-            // fail fast
-            break;
+            // Try to reconnect
+            if (zk.getState() != ZooKeeper.States.CONNECTED) {
+              connectToZK(zkHostname);
+            }
           }
           context.sem.acquire();
           zk.multi(ops, cb, context);
@@ -180,6 +195,8 @@ public class SnapDelete implements Watcher {
           ops = new ArrayList<>();
         }
       }
+    } catch (IOException e) {
+      e.printStackTrace();
     }
   }
 
