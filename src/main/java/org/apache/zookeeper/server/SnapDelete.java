@@ -1,7 +1,7 @@
 package org.apache.zookeeper.server;
 
 import static org.apache.zookeeper.server.persistence.FileSnap.SNAP_MAGIC;
-
+import me.tongfei.progressbar.ProgressBar;
 import java.io.BufferedInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -22,29 +22,41 @@ public class SnapDelete implements Watcher {
   private final ReferenceCountedACLCache aclCache = new ReferenceCountedACLCache();
   private String znodeToDelete;
   private Stack<String> znodesToDelete;
+  private long numberOfZnodes = 0;
+  private long numberOfZnodesToDelete = 0;
+  private String digestAuth;
 
   public static void main(String[] args) throws IOException, InterruptedException {
-    System.out.println(System.getenv("CLASSPATH"));
-
-    if (args.length != 3) {
-      System.err.println("USAGE: SnapDelete snapshot_file zookeeper_node znode");
+    if (args.length < 3) {
+      System.err.println("USAGE: SnapDelete snapshot_file zookeeper_node znode [digestAuth]");
       System.exit(2);
     }
 
-    new SnapDelete(args[2]).run(args[0], args[1]);
+    SnapDelete sd = new SnapDelete(args[2]);
+    if (args.length > 3) {
+      sd.setDigestAuth(args[3]);
+    }
+    sd.run(args[0], args[1]);
   }
 
   private SnapDelete(String znode) {
     this.znodeToDelete = znode;
   }
 
-  private void run(String snapshotFile, String zkHostname) throws IOException, InterruptedException {
-    // Connect to ZooKeeper
-    zk = new ZooKeeper(zkHostname, 30000, this);
-    System.out.println("\n*** Connected to ZooKeeper with session timeout " + zk.getSessionTimeout() + " ms");
+  private void setDigestAuth(String authInfo) {
+    digestAuth = authInfo;
+  }
 
+  private void run(String snapshotFile, String zkHostname) throws IOException, InterruptedException {
     // Deserialize snapshot
     loadSnapshot(snapshotFile);
+
+    // Connect to ZooKeeper
+    zk = new ZooKeeper(zkHostname, 30000, this);
+    if (digestAuth != null) {
+      zk.addAuthInfo("digest", digestAuth.getBytes());
+    }
+    System.out.println("\n*** Connected to ZooKeeper");
 
     // Delete nodes
     deleteTree();
@@ -77,9 +89,8 @@ public class SnapDelete implements Watcher {
     // Sessions
     int count = ia.readInt("count");
     while (count > 0) {
-      long id = ia.readLong("id");
-      int to = ia.readInt("timeout");
-      //sessions.put(id, to);
+      ia.readLong("id");
+      ia.readInt("timeout");
       count--;
     }
 
@@ -91,44 +102,54 @@ public class SnapDelete implements Watcher {
     System.out.println("\n*** Snapshot loaded.");
   }
 
-  private void deserialize(InputArchive ia, String tag) throws IOException, InterruptedException {
-    long num = 0;
+  private void deserialize(InputArchive ia, String tag) throws IOException {
+    numberOfZnodes = 0;
+    numberOfZnodesToDelete = 0;
+
     String path = ia.readString("path");
     System.out.println(path);
     DataNode node = new DataNode();
 
     znodesToDelete = new Stack<String>();
     znodesToDelete.push(this.znodeToDelete);
-    ++num;
+    ++numberOfZnodes;
 
     while (!path.equals("/")) {
       if (path.startsWith(znodeToDelete + "/")) {
         znodesToDelete.push(path);
+        ++numberOfZnodesToDelete;
       }
 
       ia.readRecord(node, "node");
       path = ia.readString("path");
-      System.out.print("\r" + num);
-      System.out.flush();
+      if (++numberOfZnodes % 1000 == 0) {
+        System.out.print("\rZnodes loaded: " + numberOfZnodes);
+        System.out.flush();
+      }
     }
 
-    System.out.println();
+    System.out.println("\n*** Znodes loaded: " + numberOfZnodes);
+    System.out.println("*** Znodes to delete: " + numberOfZnodesToDelete);
   }
 
   private void deleteTree() throws InterruptedException {
-    System.out.println("\n*** Deleting subtree");
-    while (!znodesToDelete.empty()) {
-      String znode = znodesToDelete.pop();
-      delete(znode);
+    System.out.println("\n*** Deleting subtree: " + numberOfZnodesToDelete + " znodes");
+    try (ProgressBar pb = new ProgressBar("Deleting", numberOfZnodesToDelete)) {
+      while (!znodesToDelete.empty()) {
+        String znode = znodesToDelete.pop();
+        delete(znode);
+        pb.step();
+      }
     }
   }
 
   private void delete(String znode) throws InterruptedException {
     try {
       zk.delete(znode, -1);
-      System.out.println(znode + ": deleted");
     } catch (KeeperException e) {
-      System.out.println(znode + ": " + e.getMessage());
+      if (e.code() != KeeperException.Code.NONODE) {
+        System.out.println(znode + ": " + e.getMessage());
+      }
     }
   }
 }
