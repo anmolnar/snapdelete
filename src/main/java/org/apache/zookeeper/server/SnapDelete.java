@@ -160,7 +160,7 @@ public class SnapDelete implements Watcher {
       BatchedDeleteCbContext context = new BatchedDeleteCbContext(rateLimit);
       AsyncCallback.MultiCallback cb = (rc, path, ctx, opResults) -> {
         ((BatchedDeleteCbContext) ctx).sem.release();
-        if (rc != KeeperException.Code.OK.intValue()) {
+        if (!(rc == KeeperException.Code.OK.intValue() || rc == KeeperException.Code.NONODE.intValue())) {
           ((BatchedDeleteCbContext) ctx).success.set(false);
         }
       };
