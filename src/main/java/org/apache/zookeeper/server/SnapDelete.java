@@ -137,7 +137,7 @@ public class SnapDelete implements Watcher {
   private void deleteTree() throws InterruptedException {
     System.out.println("\n*** Deleting subtree: " + numberOfZnodesToDelete + " znodes");
     try (ProgressBar pb = new ProgressBar("Deleting", numberOfZnodesToDelete)) {
-      for (int i = numberOfZnodesToDelete; i >= 0; --i) {
+      for (int i = numberOfZnodesToDelete - 1; i >= 0; --i) {
         String znode = znodesToDelete.get(i);
         delete(znode);
         pb.step();
