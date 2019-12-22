@@ -13,6 +13,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.Adler32;
 import java.util.zip.CheckedInputStream;
+import org.apache.commons.cli.*;
 import org.apache.jute.BinaryInputArchive;
 import org.apache.jute.InputArchive;
 import org.apache.zookeeper.AsyncCallback;
@@ -25,38 +26,25 @@ import org.apache.zookeeper.server.persistence.FileHeader;
 
 public class SnapDelete implements Watcher {
   private String zkHostname;
+  private String snapshotFile;
   private ZooKeeper zk;
   private final ReferenceCountedACLCache aclCache = new ReferenceCountedACLCache();
   private String znodeToDelete;
   private ArrayList<String> znodesToDelete;
-  private long numberOfZnodes = 0;
   private int numberOfZnodesToDelete = 0;
   private String digestAuth;
   private int batchSize = 1000;
+  private int rateLimit = 10;
   private CountDownLatch connected = new CountDownLatch(1);
 
   public static void main(String[] args) throws IOException, InterruptedException {
-    if (args.length < 3) {
-      System.err.println("USAGE: SnapDelete snapshot_file zookeeper_node znode [digestAuth]");
-      System.exit(2);
-    }
-
-    SnapDelete sd = new SnapDelete(args[2]);
-    if (args.length > 3) {
-      sd.setDigestAuth(args[3]);
-    }
-    sd.run(args[0], args[1]);
+    SnapDelete sd = new SnapDelete();
+    sd.parseCommandLineArguments(args);
+    sd.dumpConfig();
+    sd.run();
   }
 
-  private SnapDelete(String znode) {
-    this.znodeToDelete = znode;
-  }
-
-  private void setDigestAuth(String authInfo) {
-    digestAuth = authInfo;
-  }
-
-  private void run(String snapshotFile, String zkHostname) throws IOException, InterruptedException {
+  private void run() throws IOException, InterruptedException {
     // Deserialize snapshot
     loadSnapshot(snapshotFile);
 
@@ -122,7 +110,7 @@ public class SnapDelete implements Watcher {
   }
 
   private void deserialize(InputArchive ia, String tag) throws IOException {
-    numberOfZnodes = 0;
+    long numberOfZnodes = 0;
     numberOfZnodesToDelete = 0;
 
     String path = ia.readString("path");
@@ -163,13 +151,10 @@ public class SnapDelete implements Watcher {
     }
   }
 
-
   private void deleteTree() throws InterruptedException {
     System.out.println("\n*** Deleting subtree: " + numberOfZnodesToDelete + " znodes");
     try (ProgressBar pb = new ProgressBar("Deleting", numberOfZnodesToDelete)) {
-      int rateLimit = 10;
       List<Op> ops = new ArrayList<>();
-
       BatchedDeleteCbContext context = new BatchedDeleteCbContext(rateLimit);
       AsyncCallback.MultiCallback cb = (rc, path, ctx, opResults) -> {
         ((BatchedDeleteCbContext) ctx).sem.release();
@@ -200,14 +185,51 @@ public class SnapDelete implements Watcher {
     }
   }
 
-  private void delete(String znode) throws InterruptedException {
-    try {
-      zk.delete(znode, -1);
+  private void parseCommandLineArguments(String[] args) {
+    Options options = new Options();
 
-    } catch (KeeperException e) {
-      if (e.code() != KeeperException.Code.NONODE) {
-        System.out.println(znode + ": " + e.getMessage());
+    options.addOption("a", "auth", true, "Digest authentication string (default: noauth)");
+    options.addOption("b", "batch", true, "Batch size (default: 1000)");
+    options.addOption("r", "rate",true, "Rate control, number of simultaneous batches (default: 10)");
+
+    CommandLineParser parser = new DefaultParser();
+    HelpFormatter formatter = new HelpFormatter();
+    CommandLine cmd;
+
+    try {
+      cmd = parser.parse(options, args);
+      String[] posArgs = cmd.getArgs();
+      if (posArgs.length != 3) {
+        throw new ParseException("Must have exactly 3 positional arguments");
       }
+      digestAuth = cmd.getOptionValue("auth");
+      if (cmd.getOptionValue("batch") != null) {
+        batchSize = Integer.parseInt(cmd.getOptionValue("batch"));
+      }
+      if (cmd.getOptionValue("rate") != null) {
+        rateLimit = Integer.parseInt(cmd.getOptionValue("rate"));
+      }
+      snapshotFile = posArgs[0];
+      zkHostname = posArgs[1];
+      znodeToDelete = posArgs[2];
+    } catch (Exception e) {
+      System.out.println(e.getMessage());
+      formatter.printHelp("SnapDelete -[abr] snapshot_file zookeeper_host znode", options);
+      System.exit(1);
     }
+  }
+
+  private void dumpConfig() {
+    System.out.println("\n*** Config dump\n");
+    System.out.println("Snapshot file: " + snapshotFile);
+    System.out.println("ZooKeeper hostname: " + zkHostname);
+    System.out.println("Znode to delete: " + znodeToDelete);
+    if (digestAuth != null) {
+      System.out.println("Digest authentication set: " + digestAuth);
+    } else {
+      System.out.println("Authentication is OFF");
+    }
+    System.out.println("Batch size: " + batchSize);
+    System.out.println("Rate limit: " + rateLimit);
   }
 }
